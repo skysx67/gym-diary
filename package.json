@@ -1,0 +1,12 @@
+{
+  "name": "gym-diary-bot",
+  "version": "1.0.0",
+  "description": "Telegram-бот с мини-приложением: дневник тренировок в зале",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

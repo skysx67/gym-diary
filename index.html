@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Дневник зала</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:#17212b; --text:#ffffff; --hint:#8a9aa9;
+    --card:#232e3c; --card2:#2b3846;
+    --accent:#3390ec; --accent-text:#ffffff; --danger:#e5484d;
+    --border:rgba(255,255,255,.08); --radius:14px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--text); font-size:16px; line-height:1.35;
+    -webkit-font-smoothing:antialiased;
+  }
+  #app{max-width:720px;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;}
+  header{padding:14px 16px 8px;}
+  header h1{margin:0;font-size:20px;font-weight:700;}
+  header p{margin:2px 0 0;color:var(--hint);font-size:13px;}
+
+  .week-tabs{display:flex;gap:8px;padding:10px 16px;overflow-x:auto;scrollbar-width:none;}
+  .week-tabs::-webkit-scrollbar{display:none;}
+  .week-tab{
+    flex:0 0 auto;padding:9px 14px;border-radius:999px;border:1px solid var(--border);
+    background:var(--card);color:var(--hint);font-size:14px;font-weight:600;cursor:pointer;
+    white-space:nowrap;transition:.15s;
+  }
+  .week-tab.active{background:var(--accent);color:var(--accent-text);border-color:transparent;}
+
+  .body{display:flex;flex:1;gap:12px;padding:4px 16px 24px;min-height:0;}
+  .day-rail{display:flex;flex-direction:column;gap:8px;flex:0 0 64px;}
+  .day-btn{
+    padding:14px 0;border-radius:var(--radius);border:1px solid var(--border);
+    background:var(--card);color:var(--hint);font-size:15px;font-weight:700;cursor:pointer;
+    text-align:center;transition:.15s;
+  }
+  .day-btn.active{background:var(--accent);color:var(--accent-text);border-color:transparent;}
+
+  .content{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px;}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:12px;}
+  .ex-head{display:flex;align-items:center;gap:8px;}
+  .ex-name{
+    flex:1;min-width:0;background:transparent;border:none;border-bottom:1px solid var(--border);
+    color:var(--text);font-size:17px;font-weight:600;padding:4px 2px 8px;outline:none;
+  }
+  .ex-name:focus{border-bottom-color:var(--accent);}
+  .ex-name::placeholder{color:var(--hint);}
+  .icon-btn{
+    flex:0 0 auto;width:34px;height:34px;border-radius:10px;border:1px solid var(--border);
+    background:var(--card2);color:var(--hint);font-size:16px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .icon-btn.danger{color:var(--danger);}
+  .row{display:flex;align-items:center;gap:14px;margin-top:12px;flex-wrap:wrap;}
+  .field{display:flex;align-items:center;gap:6px;}
+  .field label{color:var(--hint);font-size:13px;}
+  .num{
+    width:64px;background:var(--card2);border:1px solid var(--border);border-radius:10px;
+    color:var(--text);font-size:16px;padding:8px;text-align:center;outline:none;
+  }
+  .num:focus{border-color:var(--accent);}
+  .stepper{display:flex;align-items:center;gap:8px;}
+  .step-btn{
+    width:34px;height:34px;border-radius:10px;border:1px solid var(--border);
+    background:var(--card2);color:var(--text);font-size:20px;line-height:1;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;user-select:none;
+  }
+  .step-btn:active{background:var(--accent);}
+  .step-count{min-width:20px;text-align:center;font-weight:700;}
+
+  .sets-label{color:var(--hint);font-size:13px;margin-top:12px;}
+  .sets{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;}
+  .set{display:flex;flex-direction:column;align-items:center;gap:4px;}
+  .set span{color:var(--hint);font-size:12px;}
+  .set .num{width:56px;}
+  .prevhint{color:var(--hint);font-size:12px;margin-top:10px;}
+
+  .add{
+    background:var(--card);border:1px dashed var(--border);border-radius:var(--radius);
+    color:var(--accent);font-size:15px;font-weight:600;padding:14px;cursor:pointer;width:100%;
+  }
+  .empty{color:var(--hint);text-align:center;font-size:14px;padding:24px 12px;}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Дневник зала 🏋️</h1>
+    <p id="subtitle"></p>
+  </header>
+  <div id="weekTabs" class="week-tabs"></div>
+  <div class="body">
+    <nav id="dayRail" class="day-rail"></nav>
+    <main id="content" class="content"></main>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+  var inTelegram = !!(tg && tg.platform && tg.platform !== "unknown");
+
+  var STORAGE_KEY = "gymDiary.v2";
+  var WEEKS = 4;
+  var DAYS = [["mon","Пн"],["wed","Ср"],["fri","Пт"]];
+  var DAY_FULL = {mon:"Понедельник", wed:"Среда", fri:"Пятница"};
+
+  // ---------- Утилиты ----------
+  function uid(){
+    if(window.crypto && crypto.randomUUID){ try{ return crypto.randomUUID(); }catch(e){} }
+    return "id"+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+  }
+
+  function el(tag, attrs, kids){
+    var n = document.createElement(tag); attrs = attrs || {};
+    for(var k in attrs){
+      if(!Object.prototype.hasOwnProperty.call(attrs,k)) continue;
+      var v = attrs[k]; if(v == null) continue;
+      if(k === "class") n.className = v;
+      else if(k === "value") n.value = v;
+      else if(k.slice(0,2) === "on" && typeof v === "function") n.addEventListener(k.slice(2), v);
+      else n.setAttribute(k, v);
+    }
+    if(kids != null){
+      if(!Array.isArray(kids)) kids = [kids];
+      for(var i=0;i<kids.length;i++){
+        var kid = kids[i]; if(kid == null || kid === false) continue;
+        n.appendChild(typeof kid === "string" ? document.createTextNode(kid) : kid);
+      }
+    }
+    return n;
+  }
+
+  function confirmAction(msg, cb){
+    if(inTelegram && tg.showConfirm){
+      try{ tg.showConfirm(msg, function(ok){ if(ok) cb(); }); return; }catch(e){}
+    }
+    if(window.confirm(msg)) cb();
+  }
+
+  // ---------- Данные ----------
+  // program: { mon:[{id,name}], wed:[...], fri:[...] } — упражнения задаются 1 раз, общие для всех недель
+  // logs:    { <week>: { <day>: { <exId>: {weight, reps:[...]} } } } — цифры отдельно на каждую неделю
+  function emptyState(){
+    return { program:{mon:[],wed:[],fri:[]}, logs:{}, ui:{week:0, day:"mon"} };
+  }
+
+  function normProgramDay(arr){
+    if(!Array.isArray(arr)) return [];
+    return arr.map(function(e){
+      if(!e || typeof e !== "object") return null;
+      return { id: e.id || uid(), name: typeof e.name === "string" ? e.name : "" };
+    }).filter(Boolean);
+  }
+  function normEntry(en){
+    if(!en || typeof en !== "object") return null;
+    var reps = Array.isArray(en.reps) ? en.reps.map(function(r){ return r==null ? "" : String(r); }) : ["","",""];
+    if(reps.length === 0) reps = [""];
+    return { weight: en.weight==null ? "" : String(en.weight), reps: reps };
+  }
+  function normalize(data){
+    var base = emptyState();
+    if(data && data.program){
+      for(var i=0;i<DAYS.length;i++){ var dk=DAYS[i][0]; base.program[dk] = normProgramDay(data.program[dk]); }
+    }
+    if(data && data.logs && typeof data.logs === "object"){
+      for(var wk in data.logs){
+        if(!Object.prototype.hasOwnProperty.call(data.logs,wk)) continue;
+        if(!/^\d+$/.test(wk)) continue;
+        var wi = parseInt(wk,10); if(wi<0 || wi>=WEEKS) continue;
+        var dObj = data.logs[wk]; if(!dObj || typeof dObj !== "object") continue;
+        base.logs[wi] = {};
+        for(var j=0;j<DAYS.length;j++){
+          var d = DAYS[j][0];
+          var exObj = dObj[d]; if(!exObj || typeof exObj !== "object") continue;
+          base.logs[wi][d] = {};
+          for(var exId in exObj){
+            if(!Object.prototype.hasOwnProperty.call(exObj,exId)) continue;
+            var ne = normEntry(exObj[exId]); if(ne) base.logs[wi][d][exId] = ne;
+          }
+        }
+      }
+    }
+    if(data && data.ui){
+      if(typeof data.ui.week === "number" && data.ui.week>=0 && data.ui.week<WEEKS) base.ui.week = data.ui.week;
+      for(var m=0;m<DAYS.length;m++){ if(DAYS[m][0] === data.ui.day) base.ui.day = data.ui.day; }
+    }
+    return base;
+  }
+
+  function load(){
+    try{ var raw = localStorage.getItem(STORAGE_KEY); if(!raw) return emptyState(); return normalize(JSON.parse(raw)); }
+    catch(e){ return emptyState(); }
+  }
+  function save(){ try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){} }
+
+  var state = load();
+
+  function progDay(){ return state.program[state.ui.day]; }
+
+  function weekLogs(w,d){
+    if(!state.logs[w]) state.logs[w] = {};
+    if(!state.logs[w][d]) state.logs[w][d] = {};
+    return state.logs[w][d];
+  }
+  // ближайшая предыдущая неделя, где есть запись по этому упражнению
+  function nearestPrev(w,d,exId){
+    for(var pw=w-1; pw>=0; pw--){
+      if(state.logs[pw] && state.logs[pw][d] && state.logs[pw][d][exId]) return state.logs[pw][d][exId];
+    }
+    return null;
+  }
+  // материализуем запись недели: вес переносим с прошлой недели, повторения обнуляем (кол-во подходов сохраняем)
+  function ensureEntry(w,d,exId){
+    var lg = weekLogs(w,d);
+    if(!lg[exId]){
+      var prev = nearestPrev(w,d,exId);
+      if(prev){ lg[exId] = { weight: prev.weight, reps: prev.reps.map(function(){ return ""; }) }; }
+      else { lg[exId] = { weight:"", reps:["","",""] }; }
+    }
+    return lg[exId];
+  }
+  function deleteExercise(exId){
+    var d = state.ui.day;
+    var list = state.program[d];
+    for(var i=0;i<list.length;i++){ if(list[i].id===exId){ list.splice(i,1); break; } }
+    for(var w=0; w<WEEKS; w++){
+      if(state.logs[w] && state.logs[w][d] && state.logs[w][d][exId]) delete state.logs[w][d][exId];
+    }
+  }
+
+  // ---------- DOM ----------
+  var weekTabsEl = document.getElementById("weekTabs");
+  var dayRailEl  = document.getElementById("dayRail");
+  var contentEl  = document.getElementById("content");
+  var subtitleEl = document.getElementById("subtitle");
+
+  function renderTabs(){
+    weekTabsEl.innerHTML = "";
+    for(var i=0;i<WEEKS;i++){
+      (function(i){
+        weekTabsEl.appendChild(el("button", {
+          "class":"week-tab" + (state.ui.week===i ? " active":""),
+          onclick:function(){ state.ui.week=i; save(); renderAll(); }
+        }, "Неделя "+(i+1)));
+      })(i);
+    }
+  }
+  function renderRail(){
+    dayRailEl.innerHTML = "";
+    DAYS.forEach(function(pair){
+      dayRailEl.appendChild(el("button", {
+        "class":"day-btn" + (state.ui.day===pair[0] ? " active":""),
+        onclick:function(){ state.ui.day=pair[0]; save(); renderAll(); }
+      }, pair[1]));
+    });
+  }
+  function renderSubtitle(){
+    subtitleEl.textContent = "Неделя " + (state.ui.week+1) + " · " + DAY_FULL[state.ui.day];
+  }
+
+  function makeCard(ex){
+    var w = state.ui.week, d = state.ui.day;
+    var entry = ensureEntry(w, d, ex.id);
+    var prev = nearestPrev(w, d, ex.id);
+
+    var nameInput = el("input", {
+      "class":"ex-name", type:"text", placeholder:"Название упражнения", value: ex.name,
+      oninput:function(e){ ex.name = e.target.value; save(); }   // переименование действует на все недели
+    });
+    var delBtn = el("button", {
+      "class":"icon-btn danger", title:"Удалить упражнение",
+      onclick:function(){
+        confirmAction("Удалить упражнение из программы (со всех недель)?", function(){
+          deleteExercise(ex.id); save(); renderContent();
+        });
+      }
+    }, "✕");
+
+    var weightInput = el("input", {
+      "class":"num", type:"text", inputmode:"decimal",
+      placeholder: (prev && prev.weight) ? prev.weight : "—", value: entry.weight,
+      oninput:function(e){ entry.weight = e.target.value; save(); }
+    });
+
+    var stepCount = el("span", {"class":"step-count"}, String(entry.reps.length));
+    var minus = el("button", {"class":"step-btn", onclick:function(){
+      if(entry.reps.length>1){ entry.reps.pop(); save(); renderContent(); }
+    }}, "−");
+    var plus = el("button", {"class":"step-btn", onclick:function(){
+      entry.reps.push(""); save(); renderContent();
+    }}, "+");
+
+    var setsWrap = el("div", {"class":"sets"});
+    entry.reps.forEach(function(rep, si){
+      (function(si){
+        var ph = (prev && prev.reps && prev.reps[si]!=null && prev.reps[si]!=="") ? prev.reps[si] : "—";
+        var input = el("input", {
+          "class":"num", type:"text", inputmode:"numeric", placeholder: ph, value: rep,
+          oninput:function(e){ entry.reps[si] = e.target.value; save(); }
+        });
+        setsWrap.appendChild(el("div", {"class":"set"}, [ el("span", {}, "Подход "+(si+1)), input ]));
+      })(si);
+    });
+
+    var kids = [
+      el("div", {"class":"ex-head"}, [ nameInput, delBtn ]),
+      el("div", {"class":"row"}, [
+        el("div", {"class":"field"}, [ el("label", {}, "Вес, кг"), weightInput ]),
+        el("div", {"class":"field"}, [ el("label", {}, "Подходы"), el("div", {"class":"stepper"}, [ minus, stepCount, plus ]) ])
+      ]),
+      el("div", {"class":"sets-label"}, "Повторения по подходам:"),
+      setsWrap
+    ];
+    if(prev){
+      var repsTxt = prev.reps.filter(function(r){ return r!==""; }).join("/");
+      kids.push(el("div", {"class":"prevhint"},
+        "Прошлая неделя: " + (prev.weight ? prev.weight+" кг" : "—") + (repsTxt ? " · "+repsTxt : "")));
+    }
+    return el("div", {"class":"card"}, kids);
+  }
+
+  function renderContent(){
+    renderSubtitle();
+    contentEl.innerHTML = "";
+    var list = progDay();
+    // материализуем недельные записи (перенос веса с прошлой недели)
+    for(var i=0;i<list.length;i++){ ensureEntry(state.ui.week, state.ui.day, list[i].id); }
+    save();
+
+    if(list.length === 0){
+      contentEl.appendChild(el("div", {"class":"empty"},
+        "Программа на " + DAY_FULL[state.ui.day].toLowerCase() + " пустая. Добавь упражнения — они появятся во всех неделях."));
+    } else {
+      for(var j=0;j<list.length;j++){ contentEl.appendChild(makeCard(list[j])); }
+    }
+
+    contentEl.appendChild(el("button", {"class":"add", onclick:function(){
+      progDay().push({ id: uid(), name:"" });   // добавляется в программу => во все недели
+      save(); renderContent();
+      var names = contentEl.querySelectorAll(".ex-name");
+      if(names.length){ names[names.length-1].focus(); }
+    }}, "+ Добавить упражнение"));
+  }
+
+  function renderAll(){ renderTabs(); renderRail(); renderContent(); }
+
+  // ---------- Тема Telegram ----------
+  function applyTheme(){
+    if(!tg || !tg.themeParams) return;
+    var p = tg.themeParams, root = document.documentElement.style;
+    function set(v,val){ if(val) root.setProperty(v,val); }
+    set("--bg", p.bg_color); set("--text", p.text_color); set("--hint", p.hint_color);
+    set("--card", p.secondary_bg_color); set("--card2", p.secondary_bg_color);
+    set("--accent", p.button_color); set("--accent-text", p.button_text_color);
+    if(p.destructive_text_color) set("--danger", p.destructive_text_color);
+  }
+
+  if(tg){
+    try{ tg.ready(); tg.expand(); applyTheme(); tg.onEvent("themeChanged", applyTheme); }catch(e){}
+  }
+
+  renderAll();
+})();
+</script>
+</body>
+</html>
