@@ -115,6 +115,17 @@
   }
   .icon-btn.danger{color:var(--danger);}
   .mini-add{background:none;border:none;color:var(--accent);font-size:14px;font-weight:600;cursor:pointer;padding:10px 2px 2px;}
+  .mini-row{display:flex;gap:14px;flex-wrap:wrap;}
+  .icon-btn.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+
+  /* Суперсеты */
+  .ss-badge{font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);}
+  .ss-group{border:1px solid var(--accent);border-radius:var(--radius);background:rgba(46,125,247,.06);padding:10px 10px 0;margin-bottom:12px;}
+  .ss-group>.ss-badge{margin-bottom:8px;}
+  .ss-group .card{margin-bottom:10px;}
+  .ss-edit{border-left:3px solid var(--accent);border-radius:0 10px 10px 0;background:rgba(46,125,247,.06);padding:8px 8px 10px 10px;margin-top:10px;}
+  .ss-edit .ex-row{margin-top:8px;}
+  .ss-edit>.ss-badge{display:block;}
 
   /* Нижняя навигация */
   #tabbar{flex:0 0 auto;display:flex;background:var(--surface);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom);}
@@ -194,6 +205,7 @@
   var inTelegram = !!(tg && tg.platform && tg.platform !== "unknown");
 
   var STORAGE_KEY = "gymDiary.v3";
+  var BACKUP_KEY  = "gymDiary.v3.bak";
 
   var WD_SHORT  = ["Вс","Пн","Вт","Ср","Чт","Пт","Сб"];
   var WD_FULL   = ["Воскресенье","Понедельник","Вторник","Среда","Четверг","Пятница","Суббота"];
@@ -240,13 +252,15 @@
   }
 
   // ---------- Данные ----------
-  function emptyState(){ return { workouts:[], sessions:{}, ui:{ selectedDate: todayISO(), statsMode:"exercise", statsSel:null } }; }
+  function emptyState(){ return { workouts:[], workoutsAt:0, sessions:{}, ui:{ selectedDate: todayISO(), statsMode:"exercise", statsSel:null } }; }
 
+  function normTime(v){ return (typeof v === "number" && isFinite(v) && v > 0) ? v : 0; }
   function normExList(arr){
     if(!Array.isArray(arr)) return [];
     return arr.map(function(e){
       if(!e || typeof e !== "object") return null;
-      return { id: e.id || uid(), name: typeof e.name === "string" ? e.name : "" };
+      // ss — id группы суперсета: подряд идущие упражнения с одним ss = один суперсет
+      return { id: e.id || uid(), name: typeof e.name === "string" ? e.name : "", ss: (typeof e.ss === "string" && e.ss) ? e.ss : null };
     }).filter(Boolean);
   }
   function normWorkout(w){
@@ -261,7 +275,7 @@
   }
   function normSession(s){
     if(!s || typeof s !== "object") return null;
-    var out = { workoutId: s.workoutId || null, exercises: normExList(s.exercises), entries: {} };
+    var out = { workoutId: s.workoutId || null, at: normTime(s.at), exercises: normExList(s.exercises), entries: {} };
     if(s.entries && typeof s.entries === "object"){
       for(var id in s.entries){
         if(!Object.prototype.hasOwnProperty.call(s.entries,id)) continue;
@@ -273,6 +287,7 @@
   function normalize(data){
     var base = emptyState();
     if(data && Array.isArray(data.workouts)) base.workouts = data.workouts.map(normWorkout).filter(Boolean);
+    if(data) base.workoutsAt = normTime(data.workoutsAt);
     if(data && data.sessions && typeof data.sessions === "object"){
       for(var date in data.sessions){
         if(!Object.prototype.hasOwnProperty.call(data.sessions,date)) continue;
@@ -283,42 +298,116 @@
     return base; // ui не восстанавливаем — всегда стартуем с сегодня
   }
 
-  function load(){
-    try{ var raw = localStorage.getItem(STORAGE_KEY); if(!raw) return emptyState(); return normalize(JSON.parse(raw)); }
-    catch(e){ return emptyState(); }
+  function hasContent(s){
+    if(!s) return false;
+    if(s.workouts && s.workouts.length) return true;
+    for(var d in s.sessions){ if(Object.prototype.hasOwnProperty.call(s.sessions,d)) return true; }
+    return false;
   }
-  function saveLocal(){ try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){} }
+  function readLocal(key){
+    try{ var raw = localStorage.getItem(key); if(!raw) return null; return normalize(JSON.parse(raw)); }
+    catch(e){ return null; }
+  }
+  var restoredFromBackup = false;
+  function load(){
+    var main = readLocal(STORAGE_KEY);
+    if(hasContent(main)) return main;
+    var bak = readLocal(BACKUP_KEY);      // страховка: основной ключ пуст или битый — поднимаем копию
+    if(hasContent(bak)){ restoredFromBackup = true; return bak; }
+    return main || emptyState();
+  }
+  function saveLocal(){
+    try{
+      var json = JSON.stringify(state);
+      localStorage.setItem(STORAGE_KEY, json);
+      if(hasContent(state)) localStorage.setItem(BACKUP_KEY, json);  // копию пустотой не затираем
+    }catch(e){}
+  }
 
   // ---------- Синхронизация (CloudStorage, по ключу на день) ----------
-  // workouts -> ключ "workouts"; каждая сессия -> ключ "s:YYYY-MM-DD".
-  // localStorage — локальный кэш (работает и в браузере). Облако строго «сверху»: сбой = локально.
-  var cloudReady = false, cloudTimer = null;
+  // workouts -> ключ "workouts"; каждая сессия -> ключ "s_YYYY-MM-DD".
+  // ВАЖНО: Telegram разрешает в ключах только A-Z a-z 0-9 _ - . Ключ с любым другим символом
+  // (например с двоеточием) клиент молча отбрасывает и НЕ вызывает колбэк — поэтому charset
+  // проверяем сами, а на каждую пачку операций вешаем watchdog.
+  var KEY_RE = /^[A-Za-z0-9_-]{1,128}$/;
+  var CLOUD_TIMEOUT = 12000, MAX_RETRY = 3;
+  var cloudReady = false, cloudTimer = null, cloudBusy = false, retryLeft = MAX_RETRY;
   var dirty = { workouts:false, sessions:{}, removed:{} };
 
-  function persist(){ saveLocal(); if(cloudReady) scheduleCloudSave(); }
-  function markWorkouts(){ dirty.workouts = true; persist(); }
-  function markSession(date){ dirty.sessions[date] = true; if(dirty.removed[date]) delete dirty.removed[date]; persist(); }
+  function sessionKey(date){ return "s_" + date; }
+  function dateFromKey(k){
+    if(k.length === 12 && (k.indexOf("s_") === 0 || k.indexOf("s:") === 0)){  // "s:" — legacy
+      var d = k.slice(2); if(/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+    }
+    return null;
+  }
+
+  function persist(){ retryLeft = MAX_RETRY; saveLocal(); if(cloudReady) scheduleCloudSave(); }
+  function markWorkouts(){ dirty.workouts = true; state.workoutsAt = Date.now(); persist(); }
+  function markSession(date){
+    if(state.sessions[date]) state.sessions[date].at = Date.now();
+    dirty.sessions[date] = true; if(dirty.removed[date]) delete dirty.removed[date];
+    persist();
+  }
   function markRemoved(date){ dirty.removed[date] = true; if(dirty.sessions[date]) delete dirty.sessions[date]; persist(); }
 
   function cloudAvailable(){ return !!(inTelegram && tg.CloudStorage && tg.isVersionAtLeast && tg.isVersionAtLeast("6.9")); }
+  function dirtyEmpty(){
+    if(dirty.workouts) return false;
+    for(var a in dirty.sessions) return false;
+    for(var b in dirty.removed) return false;
+    return true;
+  }
 
   function cloudSaveNow(){
     if(cloudTimer){ clearTimeout(cloudTimer); cloudTimer = null; }
     if(!cloudAvailable()) return;
-    var ops = [];
-    if(dirty.workouts) ops.push(["set","workouts", JSON.stringify(state.workouts)]);
-    for(var d in dirty.sessions){ if(state.sessions[d]) ops.push(["set","s:"+d, JSON.stringify(state.sessions[d])]); }
-    for(var r in dirty.removed){ ops.push(["rm","s:"+r]); }
+    if(cloudBusy){ scheduleCloudSave(); return; }          // предыдущая пачка ещё летит
+    if(dirtyEmpty()){ setSyncStatus("ok"); return; }
+
+    var ops = [], d, r;
+    if(dirty.workouts) ops.push({ t:"set", key:"workouts", val:JSON.stringify({ at: state.workoutsAt, items: state.workouts }), w:true });
+    for(d in dirty.sessions){ if(state.sessions[d]) ops.push({ t:"set", key:sessionKey(d), val:JSON.stringify(state.sessions[d]), date:d }); }
+    for(r in dirty.removed){ ops.push({ t:"rm", key:sessionKey(r), date:r, rm:true }); }
     dirty = { workouts:false, sessions:{}, removed:{} };
+
+    ops = ops.filter(function(o){ return KEY_RE.test(o.key); });   // невалидный ключ = гарантированный молчаливый провал
     if(ops.length === 0){ setSyncStatus("ok"); return; }
+
     setSyncStatus("saving");
-    var pending = ops.length, failed = false;
-    ops.forEach(function(op){
-      function done(err, ok){ if(err || ok === false) failed = true; if(--pending === 0) setSyncStatus(failed ? "error" : "ok"); }
+    cloudBusy = true;
+    var pending = ops.length, failed = false, finished = false;
+    var wd = setTimeout(function(){ finish(true); }, CLOUD_TIMEOUT);
+
+    function requeue(o){
+      if(o.w) dirty.workouts = true;
+      else if(o.rm) dirty.removed[o.date] = true;
+      else dirty.sessions[o.date] = true;
+    }
+    function finish(timedOut){
+      if(finished) return; finished = true;
+      clearTimeout(wd); cloudBusy = false;
+      if(timedOut){ ops.forEach(function(o){ if(!o.done) requeue(o); }); }
+      if(failed || timedOut){
+        setSyncStatus("error");
+        if(retryLeft > 0){ retryLeft--; cloudTimer = setTimeout(cloudSaveNow, 5000); }
+      } else {
+        retryLeft = MAX_RETRY;
+        setSyncStatus(dirtyEmpty() ? "ok" : "saving");
+        if(!dirtyEmpty()) scheduleCloudSave();
+      }
+    }
+    ops.forEach(function(o){
+      function done(err, ok){
+        if(o.done) return;
+        o.done = true;
+        if(err || ok === false){ failed = true; requeue(o); }
+        if(--pending === 0) finish(false);
+      }
       try{
-        if(op[0] === "set") tg.CloudStorage.setItem(op[1], op[2], done);
-        else tg.CloudStorage.removeItem(op[1], done);
-      }catch(e){ failed = true; if(--pending === 0) setSyncStatus(failed ? "error" : "ok"); }
+        if(o.t === "set") tg.CloudStorage.setItem(o.key, o.val, done);
+        else tg.CloudStorage.removeItem(o.key, done);
+      }catch(e){ done(e || true); }
     });
   }
   function scheduleCloudSave(){
@@ -328,14 +417,18 @@
     cloudTimer = setTimeout(cloudSaveNow, 700);
   }
   function getItemsChunked(keys, cb){
-    var out = {}, i = 0;
+    var out = {}, i = 0, done = false;
+    var wd = setTimeout(function(){ if(!done){ done = true; cb(out, true); } }, CLOUD_TIMEOUT);
     (function next(){
-      if(i >= keys.length){ cb(out); return; }
+      if(done) return;
+      if(i >= keys.length){ done = true; clearTimeout(wd); cb(out, false); return; }
       var chunk = keys.slice(i, i+50); i += 50;
-      tg.CloudStorage.getItems(chunk, function(err, vals){
-        if(!err && vals){ for(var k in vals){ out[k] = vals[k]; } }
-        next();
-      });
+      try{
+        tg.CloudStorage.getItems(chunk, function(err, vals){
+          if(!err && vals){ for(var k in vals){ out[k] = vals[k]; } }
+          next();
+        });
+      }catch(e){ if(!done){ done = true; clearTimeout(wd); cb(out, true); } }
     })();
   }
   function pushAllToCloud(){
@@ -343,45 +436,109 @@
     for(var d in state.sessions){ dirty.sessions[d] = true; }
     cloudSaveNow();
   }
+
+  // Слияние локального и облачного состояния. Побеждает более свежая версия (метка at),
+  // при равных метках — та, где заполнено больше упражнений. Ничего не удаляем «в одну сторону».
+  function filledCount(s){ var n = 0; for(var id in s.entries){ if(hasData(s.entries[id])) n++; } return n; }
+  function mergeCloud(cs){
+    var pushDates = {}, pushWorkouts = false, d;
+
+    if(cs.workouts.length && cs.workoutsAt >= state.workoutsAt){
+      state.workouts = cs.workouts; state.workoutsAt = cs.workoutsAt;
+    } else if(state.workouts.length || state.workoutsAt){
+      pushWorkouts = true;                                   // локальные свежее — зальём наверх
+    } else if(cs.workouts.length){
+      state.workouts = cs.workouts; state.workoutsAt = cs.workoutsAt;
+    }
+
+    for(d in cs.sessions){
+      var c = cs.sessions[d], l = state.sessions[d];
+      if(!l){ state.sessions[d] = c; continue; }
+      var cloudWins = (c.at !== l.at) ? (c.at > l.at) : (filledCount(c) > filledCount(l));
+      if(cloudWins) state.sessions[d] = c; else pushDates[d] = true;
+    }
+    for(d in state.sessions){ if(!(d in cs.sessions)) pushDates[d] = true; }
+
+    if(pushWorkouts) dirty.workouts = true;
+    for(var p in pushDates) dirty.sessions[p] = true;
+  }
+
   function initCloud(){
     if(!cloudAvailable()){ setSyncStatus("local"); return; }
     setSyncStatus("loading");
+    var settled = false;
+    function bail(){                                          // облако не ответило — работаем локально
+      if(settled) return; settled = true;
+      cloudReady = true; setSyncStatus("error");
+    }
+    var guard = setTimeout(bail, CLOUD_TIMEOUT);
     try{
       tg.CloudStorage.getKeys(function(err, keys){
-        if(err || !keys){ cloudReady = true; pushAllToCloud(); return; }
-        var wanted = keys.filter(function(k){ return k === "workouts" || k.indexOf("s:") === 0; });
-        if(wanted.length === 0){ cloudReady = true; pushAllToCloud(); return; }
-        getItemsChunked(wanted, function(values){
-          var data = { workouts: [], sessions: {} };
-          if(values.workouts){ try{ data.workouts = JSON.parse(values.workouts); }catch(e){} }
-          for(var k in values){
-            if(k.indexOf("s:") === 0 && values[k]){ try{ data.sessions[k.slice(2)] = JSON.parse(values[k]); }catch(e){} }
+        if(settled) return;
+        clearTimeout(guard);
+        if(err || !keys){ settled = true; cloudReady = true; pushAllToCloud(); return; }
+        var wanted = keys.filter(function(k){ return k === "workouts" || dateFromKey(k) !== null; });
+        if(wanted.length === 0){ settled = true; cloudReady = true; pushAllToCloud(); return; }
+        getItemsChunked(wanted, function(values, timedOut){
+          if(settled) return; settled = true;
+          var raw = { workouts: [], workoutsAt: 0, sessions: {} };
+          if(values.workouts){
+            try{
+              var pw = JSON.parse(values.workouts);
+              if(Array.isArray(pw)) raw.workouts = pw;                                    // старый формат
+              else if(pw && Array.isArray(pw.items)){ raw.workouts = pw.items; raw.workoutsAt = pw.at; }
+            }catch(e){}
           }
-          var selected = state.ui.selectedDate;
-          state = normalize(data);
-          state.ui.selectedDate = selected;
+          for(var k in values){
+            var dt = dateFromKey(k);
+            if(dt && values[k]){ try{ raw.sessions[dt] = JSON.parse(values[k]); }catch(e){} }
+          }
+          mergeCloud(normalize(raw));
           saveLocal();
           cloudReady = true;
           renderAll();
-          setSyncStatus("ok");
+          if(timedOut){ setSyncStatus("error"); return; }
+          if(dirtyEmpty()) setSyncStatus("ok"); else cloudSaveNow();
         });
       });
-    }catch(e){ setSyncStatus("local"); }
+    }catch(e){ clearTimeout(guard); settled = true; setSyncStatus("local"); }
   }
 
   var state = load();
+  if(restoredFromBackup) saveLocal();   // сразу чиним повреждённый основной ключ
 
   // ---------- Доступ к данным ----------
   function findWorkout(id){ for(var i=0;i<state.workouts.length;i++){ if(state.workouts[i].id===id) return state.workouts[i]; } return null; }
   function hasData(entry){ return !!(entry && (entry.weight !== "" || entry.reps.some(function(r){ return r !== ""; }))); }
   function sessionHasData(s){ if(!s) return false; for(var id in s.entries){ if(hasData(s.entries[id])) return true; } return false; }
 
+  var materialized = false;   // при рендере дня появились новые записи (перенос веса) — их надо сохранить
   function ensureEntry(session, exId){
     if(!session.entries[exId]){
       var prev = nearestPrevEntry(state.ui.selectedDate, exId);
       session.entries[exId] = prev ? { weight: prev.entry.weight, reps: prev.entry.reps.map(function(){ return ""; }) } : { weight:"", reps:["","",""] };
+      materialized = true;
     }
     return session.entries[exId];
+  }
+
+  // Подряд идущие упражнения с одинаковым ss — один суперсет. Возвращает отрезки [from,to).
+  function ssRuns(list){
+    var runs = [], i = 0;
+    while(i < list.length){
+      var g = list[i].ss;
+      if(g){
+        var j = i; while(j < list.length && list[j].ss === g) j++;
+        if(j - i > 1){ runs.push({ ss:g, from:i, to:j }); i = j; continue; }
+      }
+      runs.push({ ss:null, from:i, to:i+1 }); i++;
+    }
+    return runs;
+  }
+  function cleanupSs(list){   // группа из одного упражнения — не суперсет
+    var counts = {};
+    list.forEach(function(e){ if(e.ss) counts[e.ss] = (counts[e.ss]||0) + 1; });
+    list.forEach(function(e){ if(e.ss && counts[e.ss] < 2) e.ss = null; });
   }
   // ближайшая ранняя по дате сессия с осмысленной записью по этому упражнению
   function nearestPrevEntry(date, exId){
@@ -408,7 +565,7 @@
     if(!syncEl) return;
     var map = {
       loading:["☁ загрузка…","var(--text-dim)"], saving:["☁ сохранение…","var(--text-dim)"],
-      ok:["☁ синхронизировано","var(--text-dim)"], error:["⚠ не синхронизировано","var(--danger)"],
+      ok:["☁ сохранено","var(--text-dim)"], error:["⚠ облако недоступно — сохранено на телефоне","var(--danger)"],
       local:["","var(--text-dim)"]
     };
     var v = map[s] || map.local; syncEl.textContent = v[0]; syncEl.style.color = v[1];
@@ -499,6 +656,7 @@
   // ----- Карточка дня -----
   function renderDayCard(){
     dayCardEl.innerHTML = "";
+    materialized = false;
     var date = state.ui.selectedDate;
     dayCardEl.appendChild(el("div", {"class":"day-title"}, fmtDayTitle(date)));
 
@@ -510,6 +668,12 @@
     }
 
     var wk = findWorkout(session.workoutId);
+    // сегодня и будущее подтягивают актуальный состав шаблона (правки состава/суперсетов видны сразу);
+    // прошлые дни остаются снимком. Цифры привязаны к id упражнения, поэтому не теряются.
+    if(wk && date >= todayISO()){
+      var snap = snapshotExercises(wk);
+      if(JSON.stringify(snap) !== JSON.stringify(session.exercises)){ session.exercises = snap; markSession(date); }
+    }
     dayCardEl.appendChild(el("div", {"class":"wk-head"}, [
       el("div", {"class":"wk-name"}, (wk && wk.name) ? wk.name : "Тренировка"),
       el("div", {"class":"wk-actions"}, [
@@ -525,9 +689,16 @@
     if(session.exercises.length === 0){
       dayCardEl.appendChild(el("div", {"class":"empty"}, "В этой тренировке нет упражнений. Добавь их во вкладке «Тренировки»."));
     } else {
-      for(var i=0;i<session.exercises.length;i++){ dayCardEl.appendChild(makeLogCard(session, session.exercises[i])); }
+      ssRuns(session.exercises).forEach(function(r){
+        var target = dayCardEl;
+        if(r.ss){
+          target = el("div", {"class":"ss-group"}, el("div", {"class":"ss-badge"}, "🔗 Суперсет"));
+          dayCardEl.appendChild(target);
+        }
+        for(var i=r.from;i<r.to;i++){ target.appendChild(makeLogCard(session, session.exercises[i])); }
+      });
     }
-    markSession(date); // материализованные записи (перенос веса) сохраняем
+    if(materialized) markSession(date); // перенесённые веса надо сохранить
   }
 
   // ----- Модалка выбора тренировки -----
@@ -558,12 +729,13 @@
     modalEl.hidden = true;
     if(inTelegram && tg.BackButton){ try{ tg.BackButton.offClick(closePicker); tg.BackButton.hide(); }catch(e){} }
   }
+  function snapshotExercises(wk){ return wk.exercises.map(function(e){ return { id:e.id, name:e.name, ss:e.ss||null }; }); }
   function assignWorkout(date, wk){
     function doAssign(){
       var keepEntries = (state.sessions[date] && state.sessions[date].entries) ? state.sessions[date].entries : {};
       state.sessions[date] = {
-        workoutId: wk.id,
-        exercises: wk.exercises.map(function(e){ return { id:e.id, name:e.name }; }),
+        workoutId: wk.id, at: 0,
+        exercises: snapshotExercises(wk),
         entries: keepEntries
       };
       markSession(date); closePicker(); renderStrip(false); renderDayCard();
@@ -580,6 +752,30 @@
     var names = workoutsEl.querySelectorAll(".wk-title");
     if(names.length) names[names.length-1].focus();
   }
+  function linkAt(list, i){            // объединить упражнение с предыдущим (и всю его группу)
+    var target = list[i-1].ss || uid();
+    list[i-1].ss = target;
+    var old = list[i].ss;
+    if(old){ for(var j=i; j<list.length && list[j].ss===old; j++) list[j].ss = target; }
+    else list[i].ss = target;
+    cleanupSs(list);
+  }
+  function unlinkAt(list, i){          // отцепить от предыдущего: хвост группы уходит в новую группу
+    var g = list[i].ss, ng = uid();
+    for(var j=i; j<list.length && list[j].ss===g; j++) list[j].ss = ng;
+    cleanupSs(list);
+  }
+  function isLinked(list, i){ return i > 0 && !!list[i].ss && list[i-1].ss === list[i].ss; }
+
+  // renderWorkouts() пересобирает DOM, поэтому фокус ставим по свежим узлам нужного блока
+  function focusInBlock(wi, sel, fromEnd){
+    var blocks = workoutsEl.querySelectorAll(".wk-block");
+    if(wi >= blocks.length) return;
+    var rows = blocks[wi].querySelectorAll(sel);
+    var idx = rows.length - 1 - (fromEnd || 0);
+    if(idx >= 0) rows[idx].focus();
+  }
+
   function renderWorkouts(){
     workoutsEl.innerHTML = "";
     if(state.workouts.length === 0){
@@ -596,20 +792,52 @@
         }}, "✕")
       ]);
       var block = el("div", {"class":"wk-block"}, [head]);
-      wk.exercises.forEach(function(ex, ei){
-        block.appendChild(el("div", {"class":"ex-row"}, [
+
+      function exRow(ex, ei){
+        var linked = isLinked(wk.exercises, ei);
+        var kids = [
           el("input", {"class":"txt", type:"text", "aria-label":"Название упражнения", autocomplete:"off", spellcheck:"false", placeholder:"Упражнение", value: ex.name,
-            oninput:function(e){ ex.name = e.target.value; markWorkouts(); } }),
-          el("button", {"class":"icon-btn danger", "aria-label":"Удалить упражнение", title:"Удалить упражнение", onclick:function(){
-            wk.exercises.splice(ei,1); markWorkouts(); renderWorkouts();
-          }}, "✕")
-        ]));
+            oninput:function(e){ ex.name = e.target.value; markWorkouts(); } })
+        ];
+        if(ei > 0){
+          kids.push(el("button", {
+            "class":"icon-btn" + (linked ? " on" : ""), "aria-pressed": linked ? "true" : "false",
+            "aria-label": linked ? "Разъединить суперсет" : "Объединить с предыдущим в суперсет",
+            title: linked ? "Разъединить суперсет" : "Объединить с предыдущим в суперсет",
+            onclick:function(){
+              if(linked) unlinkAt(wk.exercises, ei); else linkAt(wk.exercises, ei);
+              markWorkouts(); renderWorkouts();
+            }
+          }, "🔗"));
+        }
+        kids.push(el("button", {"class":"icon-btn danger", "aria-label":"Удалить упражнение", title:"Удалить упражнение", onclick:function(){
+          wk.exercises.splice(ei,1); cleanupSs(wk.exercises); markWorkouts(); renderWorkouts();
+        }}, "✕"));
+        return el("div", {"class":"ex-row"}, kids);
+      }
+
+      ssRuns(wk.exercises).forEach(function(r){
+        var target = block;
+        if(r.ss){
+          target = el("div", {"class":"ss-edit"}, el("div", {"class":"ss-badge"}, "🔗 Суперсет"));
+          block.appendChild(target);
+        }
+        for(var i=r.from;i<r.to;i++){ target.appendChild(exRow(wk.exercises[i], i)); }
       });
-      block.appendChild(el("button", {"class":"mini-add", onclick:function(){
-        wk.exercises.push({ id: uid(), name:"" }); markWorkouts(); renderWorkouts();
-        var rows = block.querySelectorAll(".ex-row .txt");
-        if(rows.length) rows[rows.length-1].focus();
-      }}, "＋ упражнение"));
+
+      block.appendChild(el("div", {"class":"mini-row"}, [
+        el("button", {"class":"mini-add", onclick:function(){
+          wk.exercises.push({ id: uid(), name:"", ss:null }); markWorkouts(); renderWorkouts();
+          focusInBlock(wi, ".ex-row .txt", 0);
+        }}, "＋ упражнение"),
+        el("button", {"class":"mini-add", onclick:function(){
+          var g = uid();
+          wk.exercises.push({ id: uid(), name:"", ss:g });
+          wk.exercises.push({ id: uid(), name:"", ss:g });
+          markWorkouts(); renderWorkouts();
+          focusInBlock(wi, ".ex-row .txt", 1);
+        }}, "＋ суперсет")
+      ]));
       workoutsEl.appendChild(block);
     });
     workoutsEl.appendChild(el("button", {"class":"btn-primary", style:"margin-top:4px", onclick:createWorkout}, "＋ Создать тренировку"));
