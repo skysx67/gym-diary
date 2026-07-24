@@ -80,9 +80,21 @@
   .step-count{min-width:20px;text-align:center;font-weight:700;}
   .sets-label{color:var(--text-dim);font-size:13px;margin-top:12px;}
   .sets{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;}
-  .set{display:flex;flex-direction:column;align-items:center;gap:4px;}
+  .set{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:78px;}
   .set span{color:var(--text-dim);font-size:12px;}
   .set .num{width:56px;}
+  .setw-add{
+    align-self:stretch;background:none;border:1px dashed var(--border);border-radius:8px;
+    color:var(--text-dim);font-size:11px;padding:7px 4px;cursor:pointer;
+  }
+  .setw-add:active{border-color:var(--accent);color:var(--accent);}
+  .setw{display:flex;align-items:center;gap:2px;}
+  .setw .num{width:52px;padding:6px;font-size:14px;}
+  .setw-x{
+    flex:0 0 auto;width:24px;height:24px;border:none;background:none;color:var(--text-dim);
+    font-size:13px;line-height:1;cursor:pointer;border-radius:6px;
+  }
+  .setw-x:active{background:var(--surface-2);color:var(--danger);}
   .prevhint{color:var(--text-dim);font-size:12px;margin-top:10px;}
 
   /* Кнопки */
@@ -160,6 +172,17 @@
   .pick-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:14px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);margin-bottom:8px;cursor:pointer;}
   .pick-row .n{font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .pick-row .c{color:var(--text-dim);font-size:13px;flex:0 0 auto;}
+  .sheet-note{color:var(--text-dim);font-size:13px;margin-bottom:10px;}
+  .sheet-err{color:var(--danger);font-size:13px;min-height:16px;margin-bottom:8px;}
+  .codebox{
+    width:100%;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;
+    color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;
+    padding:10px;margin-bottom:10px;resize:none;outline:none;word-break:break-all;
+  }
+  .codebox:focus{border-color:var(--accent);}
+  .imp-list{margin-top:10px;}
+  .imp-ex{padding:8px 2px;border-bottom:1px solid var(--border);font-size:15px;overflow-wrap:anywhere;}
+  .imp-list .ss-edit .imp-ex:last-child{border-bottom:none;}
 
   button{touch-action:manipulation;}
   :focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
@@ -244,6 +267,54 @@
     }
     return n;
   }
+  // ---------- Обмен тренировками (код) ----------
+  // Сервера нет (Pages отдаёт статику), поэтому программа кодируется в текст и передаётся
+  // любым способом. Формат: строка "1", название, дальше упражнения с префиксом
+  // "-" (обычное) или "+" (в суперсете с предыдущим). Всё это в base64url.
+  var BOT_LINK = "https://t.me/dnevnik_spuchenka_bot";
+  var MAX_NAME = 80, MAX_EX = 60;
+
+  function b64urlEncode(str){
+    var bytes = new TextEncoder().encode(str), bin = "";
+    for(var i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+  }
+  function b64urlDecode(s){
+    s = s.replace(/-/g,"+").replace(/_/g,"/");
+    while(s.length % 4) s += "=";
+    var bin = atob(s), bytes = new Uint8Array(bin.length);
+    for(var i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  }
+  function encodeWorkout(wk){
+    var lines = ["1", (wk.name || "Тренировка").slice(0, MAX_NAME)];
+    wk.exercises.forEach(function(e, i){
+      var linked = i > 0 && e.ss && wk.exercises[i-1].ss === e.ss;
+      lines.push((linked ? "+" : "-") + (e.name || "").slice(0, MAX_NAME));
+    });
+    return b64urlEncode(lines.join("\n"));
+  }
+  function decodeWorkout(code){
+    var txt;
+    try{ txt = b64urlDecode(String(code).trim().replace(/\s+/g,"")); }catch(e){ return null; }
+    var lines = txt.split("\n");
+    if(lines[0] !== "1" || lines.length < 3) return null;
+    var exs = [];
+    for(var i=2; i<lines.length && exs.length < MAX_EX; i++){
+      var l = lines[i], c = l.charAt(0);
+      if(c !== "+" && c !== "-") return null;
+      var ex = { id: uid(), name: l.slice(1, MAX_NAME+1), ss: null };   // id всегда новые
+      if(c === "+" && exs.length){
+        var prev = exs[exs.length-1];
+        if(!prev.ss) prev.ss = uid();
+        ex.ss = prev.ss;
+      }
+      exs.push(ex);
+    }
+    if(!exs.length) return null;
+    return { id: uid(), name: lines[1].slice(0, MAX_NAME), exercises: exs };
+  }
+
   function confirmAction(msg, cb){
     if(inTelegram && tg.showConfirm){
       try{ tg.showConfirm(msg, function(ok){ if(ok) cb(); }); return; }catch(e){}
@@ -271,7 +342,11 @@
     if(!en || typeof en !== "object") return null;
     var reps = Array.isArray(en.reps) ? en.reps.map(function(r){ return r==null ? "" : String(r); }) : ["","",""];
     if(reps.length === 0) reps = [""];
-    return { weight: en.weight==null ? "" : String(en.weight), reps: reps };
+    // wts[i]: null — у подхода нет своего веса (берётся общий), строка — свой вес подхода
+    var wts = Array.isArray(en.wts) ? en.wts.map(function(w){ return w==null ? null : String(w); }) : [];
+    while(wts.length < reps.length) wts.push(null);
+    wts.length = reps.length;
+    return { weight: en.weight==null ? "" : String(en.weight), reps: reps, wts: wts };
   }
   function normSession(s){
     if(!s || typeof s !== "object") return null;
@@ -509,14 +584,36 @@
 
   // ---------- Доступ к данным ----------
   function findWorkout(id){ for(var i=0;i<state.workouts.length;i++){ if(state.workouts[i].id===id) return state.workouts[i]; } return null; }
-  function hasData(entry){ return !!(entry && (entry.weight !== "" || entry.reps.some(function(r){ return r !== ""; }))); }
+  function hasData(entry){
+    if(!entry) return false;
+    if(entry.weight !== "") return true;
+    if(entry.reps.some(function(r){ return r !== ""; })) return true;
+    return (entry.wts || []).some(function(w){ return w != null && w !== ""; });
+  }
+  // вес конкретного подхода: свой, если задан, иначе общий
+  function setWeight(entry, si){
+    var w = entry.wts ? entry.wts[si] : null;
+    return (w != null && w !== "") ? w : entry.weight;
+  }
+  // «рабочий» вес упражнения за день — максимальный из общего и весов подходов
+  function topWeight(entry){
+    var best = null, w = parseFloat(entry.weight);
+    if(!isNaN(w)) best = w;
+    (entry.wts || []).forEach(function(x){
+      var v = parseFloat(x);
+      if(!isNaN(v) && (best === null || v > best)) best = v;
+    });
+    return best;
+  }
   function sessionHasData(s){ if(!s) return false; for(var id in s.entries){ if(hasData(s.entries[id])) return true; } return false; }
 
   var materialized = false;   // при рендере дня появились новые записи (перенос веса) — их надо сохранить
   function ensureEntry(session, exId){
     if(!session.entries[exId]){
       var prev = nearestPrevEntry(state.ui.selectedDate, exId);
-      session.entries[exId] = prev ? { weight: prev.entry.weight, reps: prev.entry.reps.map(function(){ return ""; }) } : { weight:"", reps:["","",""] };
+      session.entries[exId] = prev
+        ? { weight: prev.entry.weight, reps: prev.entry.reps.map(function(){ return ""; }), wts: prev.entry.wts.slice() }
+        : { weight:"", reps:["","",""], wts:[null,null,null] };
       materialized = true;
     }
     return session.entries[exId];
@@ -618,11 +715,41 @@
     });
     var stepCount = el("span", {"class":"step-count"}, String(entry.reps.length));
     var minus = el("button", {"class":"step-btn", "aria-label":"Убрать подход", onclick:function(){
-      if(entry.reps.length>1){ entry.reps.pop(); markSession(state.ui.selectedDate); renderDayCard(); }
+      if(entry.reps.length>1){ entry.reps.pop(); entry.wts.pop(); markSession(state.ui.selectedDate); renderDayCard(); }
     }}, "−");
     var plus = el("button", {"class":"step-btn", "aria-label":"Добавить подход", onclick:function(){
-      entry.reps.push(""); markSession(state.ui.selectedDate); renderDayCard();
+      entry.reps.push(""); entry.wts.push(null); markSession(state.ui.selectedDate); renderDayCard();
     }}, "+");
+
+    // Свой вес подхода: «＋ вес» подставляет общий вес, дальше правишь цифру. ✕ — вернуть общий.
+    function weightSlot(si){
+      var slot = el("div", {"class":"setw-slot"});
+      function draw(focusIt){
+        slot.innerHTML = "";
+        if(entry.wts[si] == null){
+          slot.appendChild(el("button", {"class":"setw-add", "aria-label":"Задать свой вес для подхода "+(si+1), onclick:function(){
+            entry.wts[si] = weightInput.value || "";
+            markSession(state.ui.selectedDate); draw(true);
+          }}, "＋ вес"));
+          return;
+        }
+        var ph = (prev && prev.entry.wts && prev.entry.wts[si] != null && prev.entry.wts[si] !== "") ? prev.entry.wts[si] : (entry.weight || "—");
+        var inp = el("input", {
+          "class":"num", type:"text", inputmode:"decimal", autocomplete:"off",
+          "aria-label":"Вес подхода "+(si+1)+", кг", placeholder: ph, value: entry.wts[si],
+          oninput:function(e){ entry.wts[si] = e.target.value; markSession(state.ui.selectedDate); }
+        });
+        slot.appendChild(el("div", {"class":"setw"}, [
+          inp,
+          el("button", {"class":"setw-x", "aria-label":"Убрать свой вес подхода "+(si+1), title:"Вернуть общий вес", onclick:function(){
+            entry.wts[si] = null; markSession(state.ui.selectedDate); draw(false);
+          }}, "✕")
+        ]));
+        if(focusIt){ inp.focus(); try{ inp.select(); }catch(e){} }
+      }
+      draw(false);
+      return slot;
+    }
 
     var setsWrap = el("div", {"class":"sets"});
     entry.reps.forEach(function(rep, si){
@@ -631,7 +758,8 @@
         setsWrap.appendChild(el("div", {"class":"set"}, [
           el("span", {}, "Подход "+(si+1)),
           el("input", { "class":"num", type:"text", inputmode:"numeric", "aria-label":"Повторения, подход "+(si+1), autocomplete:"off", placeholder: ph, value: rep,
-            oninput:function(e){ entry.reps[si] = e.target.value; markSession(state.ui.selectedDate); } })
+            oninput:function(e){ entry.reps[si] = e.target.value; markSession(state.ui.selectedDate); } }),
+          weightSlot(si)
         ]));
       })(si);
     });
@@ -646,9 +774,20 @@
       setsWrap
     ];
     if(prev){
-      var repsTxt = prev.entry.reps.filter(function(r){ return r!==""; }).join("/");
-      kids.push(el("div", {"class":"prevhint"},
-        "Прошлый раз (" + fmtShort(prev.date) + "): " + (prev.entry.weight ? prev.entry.weight+" кг" : "—") + (repsTxt ? " · "+repsTxt : "")));
+      var pe = prev.entry;
+      var varied = (pe.wts || []).some(function(w){ return w != null && w !== "" && w !== pe.weight; });
+      var txt;
+      if(varied){
+        // веса гуляли по подходам — показываем парами «повторы×вес»
+        txt = pe.reps.map(function(r, i){
+          var w = setWeight(pe, i);
+          return (r !== "" ? r : "—") + (w ? "×"+w : "");
+        }).join(" / ");
+      } else {
+        var repsTxt = pe.reps.filter(function(r){ return r!==""; }).join("/");
+        txt = (pe.weight ? pe.weight+" кг" : "—") + (repsTxt ? " · "+repsTxt : "");
+      }
+      kids.push(el("div", {"class":"prevhint"}, "Прошлый раз (" + fmtShort(prev.date) + "): " + txt));
     }
     return el("div", {"class":"card"}, kids);
   }
@@ -701,33 +840,118 @@
     if(materialized) markSession(date); // перенесённые веса надо сохранить
   }
 
+  // ----- Модалка (общая) -----
+  var backRegistered = false;   // модалка может смениться на другую — BackButton вешаем один раз
+  function openSheet(build){
+    sheetEl.innerHTML = "";
+    build(sheetEl);
+    sheetEl.appendChild(el("button", {"class":"linkbtn", style:"display:block;margin:10px auto 0", onclick:closeSheet}, "Отмена"));
+    sheetEl.scrollTop = 0;
+    modalEl.hidden = false;
+    modalEl.onclick = function(e){ if(e.target === modalEl) closeSheet(); };
+    if(!backRegistered && inTelegram && tg.BackButton){
+      try{ tg.BackButton.show(); tg.BackButton.onClick(closeSheet); backRegistered = true; }catch(e){}
+    }
+  }
+  function closeSheet(){
+    modalEl.hidden = true;
+    if(backRegistered && inTelegram && tg.BackButton){
+      try{ tg.BackButton.offClick(closeSheet); tg.BackButton.hide(); backRegistered = false; }catch(e){}
+    }
+  }
+
+  // ----- Поделиться тренировкой / добавить по коду -----
+  function copyToClipboard(text, field, btn, okLabel, defLabel){
+    function ok(){ btn.textContent = okLabel; setTimeout(function(){ btn.textContent = defLabel; }, 1800); }
+    function fallback(){
+      try{ field.focus(); field.setSelectionRange(0, field.value.length); document.execCommand("copy"); ok(); }
+      catch(e){ btn.textContent = "Выдели код выше и скопируй"; }
+    }
+    try{
+      if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(ok, fallback); return; }
+    }catch(e){}
+    fallback();
+  }
+  function openShare(wk){
+    var code = encodeWorkout(wk);
+    var name = wk.name || "Без названия";
+    openSheet(function(s){
+      s.appendChild(el("h3", {}, "Поделиться: " + name));
+      s.appendChild(el("div", {"class":"sheet-note"}, "Отправь другу этот код. У себя он откроет «Тренировки» → «Добавить по коду» и вставит его."));
+      var field = el("textarea", {"class":"codebox", readonly:"readonly", rows:"3", "aria-label":"Код тренировки"});
+      field.value = code;
+      field.addEventListener("focus", function(){ try{ field.setSelectionRange(0, field.value.length); }catch(e){} });
+      s.appendChild(field);
+      var copyBtn = el("button", {"class":"btn-primary", onclick:function(){
+        copyToClipboard(code, field, copyBtn, "Скопировано ✓", "Скопировать код");
+      }}, "Скопировать код");
+      s.appendChild(copyBtn);
+      if(inTelegram && tg.openTelegramLink){
+        s.appendChild(el("button", {"class":"btn-ghost", style:"margin-top:8px", onclick:function(){
+          var msg = "Тренировка «" + name + "» для Дневника зала.\nКод:\n" + code + "\n\nОткрой бота → Тренировки → «Добавить по коду».";
+          try{ tg.openTelegramLink("https://t.me/share/url?url=" + encodeURIComponent(BOT_LINK) + "&text=" + encodeURIComponent(msg)); }catch(e){}
+        }}, "Отправить в Telegram"));
+      }
+    });
+  }
+  function addImported(wk){
+    state.workouts.push(wk);
+    markWorkouts(); closeSheet(); setTab("workouts");
+  }
+  function openImport(){
+    openSheet(function(s){
+      s.appendChild(el("h3", {}, "Добавить по коду"));
+      s.appendChild(el("div", {"class":"sheet-note"}, "Вставь код тренировки, который прислал друг."));
+      var field = el("textarea", {"class":"codebox", rows:"3", placeholder:"Вставь код сюда", "aria-label":"Код тренировки", autocomplete:"off", spellcheck:"false"});
+      s.appendChild(field);
+      var err = el("div", {"class":"sheet-err"});
+      s.appendChild(err);
+      s.appendChild(el("button", {"class":"btn-primary", onclick:function(){
+        var wk = decodeWorkout(field.value);
+        if(!wk){ err.textContent = "Код не распознан. Проверь, что скопирован он целиком."; return; }
+        openImportConfirm(wk);
+      }}, "Добавить"));
+    });
+  }
+  function openImportConfirm(wk){
+    openSheet(function(s){
+      s.appendChild(el("h3", {}, "Добавить тренировку?"));
+      s.appendChild(el("div", {"class":"pick-row"}, [
+        el("div", {"class":"n"}, wk.name || "Без названия"),
+        el("div", {"class":"c"}, wk.exercises.length + " упр.")
+      ]));
+      var list = el("div", {"class":"imp-list"});
+      ssRuns(wk.exercises).forEach(function(r){
+        var target = list;
+        if(r.ss){
+          target = el("div", {"class":"ss-edit"}, el("div", {"class":"ss-badge"}, "🔗 Суперсет"));
+          list.appendChild(target);
+        }
+        for(var i=r.from;i<r.to;i++){ target.appendChild(el("div", {"class":"imp-ex"}, wk.exercises[i].name || "Без названия")); }
+      });
+      s.appendChild(list);
+      s.appendChild(el("button", {"class":"btn-primary", style:"margin-top:10px", onclick:function(){ addImported(wk); }}, "Добавить себе"));
+    });
+  }
+
   // ----- Модалка выбора тренировки -----
   function openPicker(date){
-    sheetEl.innerHTML = "";
-    sheetEl.appendChild(el("h3", {}, state.sessions[date] ? "Сменить тренировку" : "Выбор тренировки"));
-
-    if(state.workouts.length === 0){
-      sheetEl.appendChild(el("div", {"class":"empty"}, "У тебя пока нет тренировок. Создай первую."));
-    } else {
-      state.workouts.forEach(function(wk){
-        sheetEl.appendChild(el("div", {"class":"pick-row", onclick:function(){ assignWorkout(date, wk); }}, [
-          el("div", {"class":"n"}, wk.name || "Без названия"),
-          el("div", {"class":"c"}, wk.exercises.length + " упр.")
-        ]));
-      });
-    }
-    sheetEl.appendChild(el("button", {"class":"btn-ghost", style:"margin-top:8px", onclick:function(){
-      closePicker(); setTab("workouts"); createWorkout();
-    }}, "＋ Создать тренировку"));
-    sheetEl.appendChild(el("button", {"class":"linkbtn", style:"display:block;margin:10px auto 0", onclick:closePicker}, "Отмена"));
-
-    modalEl.hidden = false;
-    modalEl.onclick = function(e){ if(e.target === modalEl) closePicker(); };
-    if(inTelegram && tg.BackButton){ try{ tg.BackButton.show(); tg.BackButton.onClick(closePicker); }catch(e){} }
-  }
-  function closePicker(){
-    modalEl.hidden = true;
-    if(inTelegram && tg.BackButton){ try{ tg.BackButton.offClick(closePicker); tg.BackButton.hide(); }catch(e){} }
+    openSheet(function(s){
+      s.appendChild(el("h3", {}, state.sessions[date] ? "Сменить тренировку" : "Выбор тренировки"));
+      if(state.workouts.length === 0){
+        s.appendChild(el("div", {"class":"empty"}, "У тебя пока нет тренировок. Создай первую."));
+      } else {
+        state.workouts.forEach(function(wk){
+          s.appendChild(el("div", {"class":"pick-row", onclick:function(){ assignWorkout(date, wk); }}, [
+            el("div", {"class":"n"}, wk.name || "Без названия"),
+            el("div", {"class":"c"}, wk.exercises.length + " упр.")
+          ]));
+        });
+      }
+      s.appendChild(el("button", {"class":"btn-ghost", style:"margin-top:8px", onclick:function(){
+        closeSheet(); setTab("workouts"); createWorkout();
+      }}, "＋ Создать тренировку"));
+    });
   }
   function snapshotExercises(wk){ return wk.exercises.map(function(e){ return { id:e.id, name:e.name, ss:e.ss||null }; }); }
   function assignWorkout(date, wk){
@@ -738,7 +962,7 @@
         exercises: snapshotExercises(wk),
         entries: keepEntries
       };
-      markSession(date); closePicker(); renderStrip(false); renderDayCard();
+      markSession(date); closeSheet(); renderStrip(false); renderDayCard();
     }
     if(sessionHasData(state.sessions[date])){
       confirmAction("Заменить тренировку этого дня? Введённые цифры останутся только для совпадающих упражнений.", doAssign);
@@ -836,11 +1060,13 @@
           wk.exercises.push({ id: uid(), name:"", ss:g });
           markWorkouts(); renderWorkouts();
           focusInBlock(wi, ".ex-row .txt", 1);
-        }}, "＋ суперсет")
+        }}, "＋ суперсет"),
+        el("button", {"class":"mini-add", onclick:function(){ openShare(wk); }}, "↗ поделиться")
       ]));
       workoutsEl.appendChild(block);
     });
     workoutsEl.appendChild(el("button", {"class":"btn-primary", style:"margin-top:4px", onclick:createWorkout}, "＋ Создать тренировку"));
+    workoutsEl.appendChild(el("button", {"class":"btn-ghost", style:"margin-top:8px", onclick:openImport}, "⬇ Добавить по коду"));
   }
 
   // ----- Статистика -----
@@ -857,11 +1083,12 @@
   function fmtNum(n){ return String(Math.round(n*10)/10); }
   function fmtDayShortFull(d){ var x=parseISO(d); return WD_SHORT[x.getDay()]+", "+x.getDate()+" "+MON_SHORT[x.getMonth()]; }
 
+  // по оси — рабочий вес: максимум из общего и весов отдельных подходов
   function exercisePoints(exId){
     var pts=[];
     Object.keys(state.sessions).sort().forEach(function(d){
       var e = state.sessions[d].entries[exId]; if(!e) return;
-      var w = num(e.weight); if(w==null) return;
+      var w = topWeight(e); if(w==null) return;
       pts.push({ date:d, y:w });
     });
     return pts;
@@ -870,7 +1097,7 @@
     var pts=[];
     Object.keys(state.sessions).sort().forEach(function(d){
       var s = state.sessions[d]; if(s.workoutId !== wid) return;
-      var ws=[]; for(var id in s.entries){ var w=num(s.entries[id].weight); if(w!=null) ws.push(w); }
+      var ws=[]; for(var id in s.entries){ var w=topWeight(s.entries[id]); if(w!=null) ws.push(w); }
       if(ws.length) pts.push({ date:d, y: Math.round(mean(ws)*10)/10, median: Math.round(median(ws)*10)/10 });
     });
     return pts;
@@ -1002,6 +1229,18 @@
 
   renderAll();
   initCloud();
+
+  // тренировка, пришедшая ссылкой t.me/<bot>?startapp=<код> (либо ?w=<код> в браузере)
+  (function(){
+    var code = null;
+    try{
+      if(tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) code = tg.initDataUnsafe.start_param;
+      if(!code) code = new URLSearchParams(location.search).get("w");
+    }catch(e){}
+    if(!code) return;
+    var wk = decodeWorkout(code);
+    if(wk) openImportConfirm(wk);
+  })();
 })();
 </script>
 </body>
