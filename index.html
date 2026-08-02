@@ -161,8 +161,11 @@
   .chart-card svg{display:block;}
   .hist-title{color:var(--text-dim);font-size:13px;margin-bottom:6px;}
   .hist{display:flex;flex-direction:column;gap:2px;max-height:240px;overflow-y:auto;overscroll-behavior:contain;}
-  .hist-row{display:flex;justify-content:space-between;gap:8px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:10px;}
+  .hist-row{display:flex;justify-content:space-between;gap:10px;align-items:baseline;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:10px;}
+  .hist-d{flex:0 0 auto;}
+  .hist-v{text-align:right;min-width:0;}
   .hist-w{font-variant-numeric:tabular-nums;font-weight:700;}
+  .hist-r{color:var(--text-dim);font-size:13px;font-variant-numeric:tabular-nums;margin-left:7px;overflow-wrap:anywhere;}
 
   /* Модалка выбора тренировки */
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;z-index:50;}
@@ -247,6 +250,16 @@
   function addDaysISO(s, n){ var d=parseISO(s); d.setDate(d.getDate()+n); return iso(d); }
   function fmtDayTitle(s){ var d=parseISO(s); return WD_FULL[d.getDay()]+", "+d.getDate()+" "+MON_GEN[d.getMonth()]; }
   function fmtShort(s){ var d=parseISO(s); return d.getDate()+" "+MON_SHORT[d.getMonth()]; }
+
+  // Вес часто вводят через запятую («42,5»), а parseFloat такое молча режет до 42 —
+  // поэтому свой разбор. Показываем тоже с запятой, без лишних нулей.
+  function num(v){
+    if(v == null) return null;
+    var n = parseFloat(String(v).replace(",", "."));
+    return isNaN(n) ? null : n;
+  }
+  function round1(n){ return Math.round(n*10)/10; }
+  function fmtNum(n){ return String(round1(n)).replace(".", ","); }
 
   function el(tag, attrs, kids){
     var n = document.createElement(tag); attrs = attrs || {};
@@ -597,13 +610,36 @@
   }
   // «рабочий» вес упражнения за день — максимальный из общего и весов подходов
   function topWeight(entry){
-    var best = null, w = parseFloat(entry.weight);
-    if(!isNaN(w)) best = w;
+    var best = num(entry.weight);
     (entry.wts || []).forEach(function(x){
-      var v = parseFloat(x);
-      if(!isNaN(v) && (best === null || v > best)) best = v;
+      var v = num(x);
+      if(v !== null && (best === null || v > best)) best = v;
     });
     return best;
+  }
+  function totalReps(entry){
+    var t = 0, any = false;
+    (entry.reps || []).forEach(function(r){ var n = num(r); if(n !== null){ t += n; any = true; } });
+    return any ? t : null;
+  }
+  function variedWeights(entry){
+    return (entry.wts || []).some(function(w){ return w != null && w !== "" && w !== entry.weight; });
+  }
+  // повторения: «12/10/9», а если вес гулял по подходам — парами «12×40 / 10×44»
+  function repsDetail(entry){
+    if(variedWeights(entry)){
+      return entry.reps.map(function(r, i){
+        var w = setWeight(entry, i);
+        return (r !== "" ? r : "—") + (w ? "×"+w : "");
+      }).join(" / ");
+    }
+    return entry.reps.filter(function(r){ return r !== ""; }).join("/");
+  }
+  // то же плюс вес — для подсказки «прошлый раз»
+  function entrySummary(entry){
+    var d = repsDetail(entry);
+    if(variedWeights(entry)) return d;
+    return (entry.weight ? entry.weight+" кг" : "—") + (d ? " · "+d : "");
   }
   function sessionHasData(s){ if(!s) return false; for(var id in s.entries){ if(hasData(s.entries[id])) return true; } return false; }
 
@@ -774,20 +810,7 @@
       setsWrap
     ];
     if(prev){
-      var pe = prev.entry;
-      var varied = (pe.wts || []).some(function(w){ return w != null && w !== "" && w !== pe.weight; });
-      var txt;
-      if(varied){
-        // веса гуляли по подходам — показываем парами «повторы×вес»
-        txt = pe.reps.map(function(r, i){
-          var w = setWeight(pe, i);
-          return (r !== "" ? r : "—") + (w ? "×"+w : "");
-        }).join(" / ");
-      } else {
-        var repsTxt = pe.reps.filter(function(r){ return r!==""; }).join("/");
-        txt = (pe.weight ? pe.weight+" кг" : "—") + (repsTxt ? " · "+repsTxt : "");
-      }
-      kids.push(el("div", {"class":"prevhint"}, "Прошлый раз (" + fmtShort(prev.date) + "): " + txt));
+      kids.push(el("div", {"class":"prevhint"}, "Прошлый раз (" + fmtShort(prev.date) + "): " + entrySummary(prev.entry)));
     }
     return el("div", {"class":"card"}, kids);
   }
@@ -1077,10 +1100,8 @@
     if(kids){ if(!Array.isArray(kids)) kids=[kids]; for(var i=0;i<kids.length;i++){ var c=kids[i]; if(c) n.appendChild(typeof c==="string"?document.createTextNode(c):c); } }
     return n;
   }
-  function num(v){ var n=parseFloat(v); return isNaN(n)?null:n; }
   function mean(a){ var s=0; for(var i=0;i<a.length;i++) s+=a[i]; return s/a.length; }
   function median(a){ var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2 ? s[m] : (s[m-1]+s[m])/2; }
-  function fmtNum(n){ return String(Math.round(n*10)/10); }
   function fmtDayShortFull(d){ var x=parseISO(d); return WD_SHORT[x.getDay()]+", "+x.getDate()+" "+MON_SHORT[x.getMonth()]; }
 
   // по оси — рабочий вес: максимум из общего и весов отдельных подходов
@@ -1089,7 +1110,7 @@
     Object.keys(state.sessions).sort().forEach(function(d){
       var e = state.sessions[d].entries[exId]; if(!e) return;
       var w = topWeight(e); if(w==null) return;
-      pts.push({ date:d, y:w });
+      pts.push({ date:d, y:w, reps: totalReps(e), text: repsDetail(e) });
     });
     return pts;
   }
@@ -1097,8 +1118,15 @@
     var pts=[];
     Object.keys(state.sessions).sort().forEach(function(d){
       var s = state.sessions[d]; if(s.workoutId !== wid) return;
-      var ws=[]; for(var id in s.entries){ var w=topWeight(s.entries[id]); if(w!=null) ws.push(w); }
-      if(ws.length) pts.push({ date:d, y: Math.round(mean(ws)*10)/10, median: Math.round(median(ws)*10)/10 });
+      var ws=[], reps=0, anyReps=false;
+      for(var id in s.entries){
+        var w = topWeight(s.entries[id]); if(w!=null) ws.push(w);
+        var r = totalReps(s.entries[id]); if(r!==null){ reps += r; anyReps = true; }
+      }
+      if(ws.length) pts.push({
+        date:d, y: round1(mean(ws)), median: round1(median(ws)),
+        reps: anyReps ? reps : null, sets: ws.length
+      });
     });
     return pts;
   }
@@ -1121,6 +1149,10 @@
     var yMax=Math.max.apply(null,ys), yMin=Math.min.apply(null,ys);
     if(yMax===yMin){ yMax+=1; yMin=Math.max(0,yMin-1); }
     var rng=yMax-yMin; yMax+=rng*0.12; yMin-=rng*0.12; if(yMin<0) yMin=0;
+    // на узком диапазоне (напр. 40…44) целые подписи врут — показываем с десятыми,
+    // под них нужно левое поле пошире
+    var fine = (yMax - yMin) < 10;
+    if(fine) padL = 46;
     function X(i){ return n===1 ? (padL+(W-padL-padR)/2) : padL + i*(W-padL-padR)/(n-1); }
     function Y(v){ return padT + (1-(v-yMin)/(yMax-yMin))*(H-padT-padB); }
 
@@ -1132,7 +1164,7 @@
     for(var g=0; g<=2; g++){
       var v=yMin+(yMax-yMin)*g/2, yy=Y(v);
       svg.appendChild(sv("line",{x1:padL,y1:yy,x2:W-padR,y2:yy,stroke:"#22304F","stroke-width":"1"}));
-      svg.appendChild(sv("text",{x:padL-6,y:yy+3,"text-anchor":"end","font-size":"10",fill:"#8C97AC"}, String(Math.round(v))));
+      svg.appendChild(sv("text",{x:padL-6,y:yy+3,"text-anchor":"end","font-size":"10",fill:"#8C97AC"}, fine ? fmtNum(v) : String(Math.round(v))));
     }
     if(n>1){
       var dA="M "+X(0)+" "+Y(points[0].y);
@@ -1174,16 +1206,20 @@
     statsEl.appendChild(select);
 
     var points = isWk ? workoutPoints(state.ui.statsSel) : exercisePoints(state.ui.statsSel);
+    var lastPt=points[points.length-1];
     var ys=points.map(function(p){return p.y;});
     var last=ys[ys.length-1], first=ys[0], max=Math.max.apply(null,ys);
-    var delta=Math.round((last-first)*10)/10;
+    var delta=round1(last-first);
 
     var tiles=el("div",{"class":"stat-tiles"},[
       statTile(isWk?"Среднее (посл.)":"Последний", fmtNum(last)+" кг"),
       statTile("Максимум", fmtNum(max)+" кг"),
       statTile("Рост", (delta>0?"+":"")+fmtNum(delta)+" кг", delta>0?"good":(delta<0?"bad":""))
     ]);
-    if(isWk) tiles.appendChild(statTile("Медиана (посл.)", fmtNum(points[points.length-1].median)+" кг"));
+    if(isWk) tiles.appendChild(statTile("Медиана (посл.)", fmtNum(lastPt.median)+" кг"));
+    if(lastPt.reps !== null && lastPt.reps !== undefined){
+      tiles.appendChild(statTile(isWk?"Повторений за тренировку":"Повторений (посл.)", fmtNum(lastPt.reps)));
+    }
     statsEl.appendChild(tiles);
 
     var selName=(opts.filter(function(o){return o.id===state.ui.statsSel;})[0]||{}).name || "";
@@ -1191,7 +1227,17 @@
 
     var hist=el("div",{"class":"hist"});
     points.slice().reverse().forEach(function(p){
-      hist.appendChild(el("div",{"class":"hist-row"},[ el("span",{},fmtDayShortFull(p.date)), el("span",{"class":"hist-w"}, fmtNum(p.y)+" кг") ]));
+      // справа — вес и повторения: «42,5 кг · 12/10/9» (или пары «12×40 / 10×44»)
+      var detail = isWk
+        ? (p.reps !== null ? fmtNum(p.reps) + " повт." : "")
+        : (p.text || "");
+      hist.appendChild(el("div",{"class":"hist-row"},[
+        el("span",{"class":"hist-d"}, fmtDayShortFull(p.date)),
+        el("span",{"class":"hist-v"},[
+          el("span",{"class":"hist-w"}, fmtNum(p.y)+" кг"),
+          detail ? el("span",{"class":"hist-r"}, detail) : null
+        ])
+      ]));
     });
     statsEl.appendChild(el("div",{},[ el("div",{"class":"hist-title"},"История"), hist ]));
   }
