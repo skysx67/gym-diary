@@ -96,6 +96,21 @@
   }
   .setw-x:active{background:var(--surface-2);color:var(--danger);}
   .prevhint{color:var(--text-dim);font-size:12px;margin-top:10px;}
+  .prevnote{
+    margin-top:10px;padding:10px 11px;border:1px solid rgba(46,125,247,.45);border-radius:10px;
+    background:rgba(46,125,247,.10);color:var(--text);font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere;
+  }
+  .prevnote-label{display:block;color:#72A8FF;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;}
+  .note-wrap{margin-top:10px;}
+  .note-add{padding-left:0;color:var(--accent);}
+  .note-label{display:block;color:var(--text-dim);font-size:12px;margin-bottom:6px;}
+  .note-input{
+    display:block;width:100%;min-height:64px;max-height:160px;resize:none;overflow-y:auto;
+    background:var(--surface-2);border:1px solid var(--border);border-radius:10px;color:var(--text);
+    font:inherit;font-size:14px;line-height:1.4;padding:9px 10px;outline:none;
+  }
+  .note-input::placeholder{color:var(--text-dim);}
+  .note-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(46,125,247,.18);}
 
   /* Кнопки */
   .btn-primary{
@@ -359,7 +374,12 @@
     var wts = Array.isArray(en.wts) ? en.wts.map(function(w){ return w==null ? null : String(w); }) : [];
     while(wts.length < reps.length) wts.push(null);
     wts.length = reps.length;
-    return { weight: en.weight==null ? "" : String(en.weight), reps: reps, wts: wts };
+    return {
+      weight: en.weight==null ? "" : String(en.weight),
+      reps: reps,
+      wts: wts,
+      note: typeof en.note === "string" ? en.note.slice(0,240) : ""
+    };
   }
   function normSession(s){
     if(!s || typeof s !== "object") return null;
@@ -601,7 +621,8 @@
     if(!entry) return false;
     if(entry.weight !== "") return true;
     if(entry.reps.some(function(r){ return r !== ""; })) return true;
-    return (entry.wts || []).some(function(w){ return w != null && w !== ""; });
+    if((entry.wts || []).some(function(w){ return w != null && w !== ""; })) return true;
+    return typeof entry.note === "string" && entry.note.trim() !== "";
   }
   // вес конкретного подхода: свой, если задан, иначе общий
   function setWeight(entry, si){
@@ -648,8 +669,8 @@
     if(!session.entries[exId]){
       var prev = nearestPrevEntry(state.ui.selectedDate, exId);
       session.entries[exId] = prev
-        ? { weight: prev.entry.weight, reps: prev.entry.reps.map(function(){ return ""; }), wts: prev.entry.wts.slice() }
-        : { weight:"", reps:["","",""], wts:[null,null,null] };
+        ? { weight: prev.entry.weight, reps: prev.entry.reps.map(function(){ return ""; }), wts: prev.entry.wts.slice(), note:"" }
+        : { weight:"", reps:["","",""], wts:[null,null,null], note:"" };
       materialized = true;
     }
     return session.entries[exId];
@@ -800,16 +821,56 @@
       })(si);
     });
 
-    var kids = [
-      el("div", {"class":"ex-name"}, ex.name || "Без названия"),
+    // Заметка остаётся в текущей сессии и показывается как подсказка на следующей.
+    // В новую запись её не копируем — пользователь пишет отдельную заметку после каждого раза.
+    var noteOpen = !!entry.note;
+    var noteWrap = el("div", {"class":"note-wrap"});
+    function drawNote(focusIt){
+      noteWrap.innerHTML = "";
+      if(!noteOpen && !entry.note){
+        noteWrap.appendChild(el("button", {"class":"linkbtn note-add", onclick:function(){
+          noteOpen = true; drawNote(true);
+        }}, "＋ Заметка на следующий раз"));
+        return;
+      }
+      var noteInput = el("textarea", {
+        "class":"note-input", rows:"2", maxlength:"240", autocomplete:"off",
+        "aria-label":"Заметка к упражнению на следующую тренировку",
+        placeholder:"Например: повысить вес на 2,5 кг…", value:entry.note,
+        oninput:function(e){
+          entry.note = e.target.value.slice(0,240);
+          e.target.style.height = "auto";
+          e.target.style.height = Math.min(e.target.scrollHeight,160) + "px";
+          markSession(state.ui.selectedDate);
+        }
+      });
+      noteWrap.appendChild(el("label", {"class":"note-label"}, "Заметка на следующий раз"));
+      noteWrap.appendChild(noteInput);
+      requestAnimationFrame(function(){
+        noteInput.style.height = "auto";
+        noteInput.style.height = Math.min(noteInput.scrollHeight,160) + "px";
+        if(focusIt) noteInput.focus();
+      });
+    }
+    drawNote(false);
+
+    var kids = [ el("div", {"class":"ex-name"}, ex.name || "Без названия") ];
+    if(prev && prev.entry.note && prev.entry.note.trim()){
+      kids.push(el("div", {"class":"prevnote"}, [
+        el("span", {"class":"prevnote-label"}, "Заметка с прошлого раза"),
+        document.createTextNode(prev.entry.note.trim())
+      ]));
+    }
+    kids.push(
       el("div", {"class":"row"}, [
         el("div", {"class":"field"}, [ el("label", {}, "Вес, кг"), weightInput ]),
         el("div", {"class":"field"}, [ el("label", {}, "Подходы"), el("div", {"class":"stepper"}, [ minus, stepCount, plus ]) ])
       ]),
       el("div", {"class":"sets-label"}, "Повторения по подходам:"),
-      setsWrap
-    ];
-    if(prev){
+      setsWrap,
+      noteWrap
+    );
+    if(prev && (topWeight(prev.entry) !== null || totalReps(prev.entry) !== null)){
       kids.push(el("div", {"class":"prevhint"}, "Прошлый раз (" + fmtShort(prev.date) + "): " + entrySummary(prev.entry)));
     }
     return el("div", {"class":"card"}, kids);
